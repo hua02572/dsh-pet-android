@@ -28,6 +28,12 @@ import org.json.JSONObject
  */
 class PetService : Service() {
 
+    companion object {
+        /** 供 App 界面判断服务是否在跑（换大小后决定要不要重启） */
+        @Volatile
+        var isRunning = false
+    }
+
     private lateinit var windowManager: WindowManager
     private var container: FrameLayout? = null
     private var webView: WebView? = null
@@ -37,6 +43,7 @@ class PetService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        isRunning = true
         startForegroundWithNotification()
         if (!android.provider.Settings.canDrawOverlays(this)) {
             stopSelf()
@@ -44,6 +51,12 @@ class PetService : Service() {
         }
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         showPet()
+    }
+
+    /** 宠物宽度：SharedPreferences 里的 sizeDp（默认 280dp），高度按 9:16 自动算 */
+    private fun petSizePx(): Int {
+        val dp = getSharedPreferences("pet", MODE_PRIVATE).getInt("sizeDp", 280)
+        return (dp * resources.displayMetrics.density).toInt()
     }
 
     private fun startForegroundWithNotification() {
@@ -176,6 +189,7 @@ class PetService : Service() {
     }
 
     override fun onDestroy() {
+        isRunning = false
         container?.let { windowManager.removeView(it) }
         container = null
         webView?.destroy()

@@ -27,11 +27,38 @@ class MainActivity : Activity() {
             setPadding(pad, pad * 2, pad, pad)
         }
         val title = TextView(this).apply {
-            text = "桌宠（dsh-pet 安卓版）\n\n1. 点「开启桌宠」\n2. 系统跳转授权页时，允许「显示在其他应用上层」\n3. 回来再点一次「开启桌宠」"
+            text = "桌宠（dsh-pet 安卓版）\n\n1. 点「开启桌宠」\n2. 系统跳转授权页时，允许「显示在其他应用上层」\n3. 回来再点一次「开启桌宠」\n\n换大小后点「应用大小并重启」生效"
             textSize = 15f
         }
         val btnStart = Button(this).apply { text = "开启桌宠" }
         val btnStop = Button(this).apply { text = "停止桌宠" }
+
+        // 宠物大小三档（宽度 dp；高度自动 9:16）
+        val sizeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val sizeTitle = TextView(this).apply { text = "宠物大小：" }
+        fun sizeButton(label: String, dp: Int): Button {
+            val b = Button(this).apply { text = label }
+            b.setOnClickListener {
+                getSharedPreferences("pet", MODE_PRIVATE).edit().putInt("sizeDp", dp).apply()
+                if (PetService.isRunning) {
+                    stopService(Intent(this, PetService::class.java))
+                    startForegroundService(Intent(this, PetService::class.java))
+                }
+            }
+            return b
+        }
+        sizeRow.addView(sizeTitle)
+        sizeRow.addView(sizeButton("小", 200))
+        sizeRow.addView(sizeButton("中", 280))
+        sizeRow.addView(sizeButton("大", 360))
+
+        val btnApply = Button(this).apply { text = "应用大小并重启" }
+        btnApply.setOnClickListener {
+            if (Settings.canDrawOverlays(this)) {
+                stopService(Intent(this, PetService::class.java))
+                startForegroundService(Intent(this, PetService::class.java))
+            }
+        }
 
         btnStart.setOnClickListener {
             if (Settings.canDrawOverlays(this)) {
@@ -51,6 +78,8 @@ class MainActivity : Activity() {
         root.addView(title)
         root.addView(btnStart)
         root.addView(btnStop)
+        root.addView(sizeRow)
+        root.addView(btnApply)
         setContentView(root)
     }
 
