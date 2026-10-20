@@ -96,8 +96,6 @@ class PetService : Service() {
         }
     }
 
-    private fun petSizePx(): Int = (300 * resources.displayMetrics.density).toInt()
-
     private fun showPet() {
         val size = petSizePx()
         val height = (size * 9f / 16f).toInt()
