@@ -120,6 +120,12 @@ class PetService : Service() {
             settings.javaScriptEnabled = true
             settings.mediaPlaybackRequiresUserGesture = false
             settings.allowFileAccess = true
+            // 关键：允许 file:// 页面读取同源媒体画入 canvas 的像素，
+            // 否则 getImageData 抛 SecurityError（画布被污染），边界测量失效
+            @Suppress("DEPRECATION")
+            settings.allowFileAccessFromFileURLs = true
+            @Suppress("DEPRECATION")
+            settings.allowUniversalAccessFromFileURLs = true
             webViewClient = WebViewClient()
         }
         webView = web
@@ -171,6 +177,11 @@ class PetService : Service() {
             fun onBox(l: Double, t: Double, w: Double, h: Double) {
                 if (w <= 0.0 || h <= 0.0) return
                 runOnUiThread { applyPetBox(params, frame, l, t, w, h) }
+            }
+
+            @android.webkit.JavascriptInterface
+            fun onDebug(msg: String?) {
+                android.util.Log.w("PetService", "js: $msg")
             }
         }, "PetBox")
 
