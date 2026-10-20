@@ -18,6 +18,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import org.json.JSONObject
+import kotlin.math.roundToInt
 
 /**
  * 悬浮窗桌宠服务：
@@ -53,7 +54,7 @@ class PetService : Service() {
         showPet()
     }
 
-    /** 宠物宽度：SharedPreferences 里的 sizeDp（默认 280dp），高度按 9:16 自动算 */
+    /** 完整动画画布宽度；裁掉透明区域时保持这个绘制比例，避免宠物忽大忽小。 */
     private fun petSizePx(): Int {
         val dp = getSharedPreferences("pet", MODE_PRIVATE).getInt("sizeDp", 280)
         return (dp * resources.displayMetrics.density).toInt()
@@ -98,7 +99,7 @@ class PetService : Service() {
 
     private fun showPet() {
         val size = petSizePx()
-        val height = (size * 9f / 16f).toInt()
+        val height = (size * 9f / 16f).roundToInt()
 
         val params = WindowManager.LayoutParams(
             size, height,
@@ -134,19 +135,25 @@ class PetService : Service() {
         // 触摸由容器的 OnTouchListener 统一处理拖动与点按，WebView 不参与手势
         val frame = object : FrameLayout(this) {
             override fun onInterceptTouchEvent(ev: MotionEvent?): Boolean = true
-        }.apply { setBackgroundColor(Color.TRANSPARENT) }
-        frame.addView(web, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        }.apply {
+            setBackgroundColor(Color.TRANSPARENT)
+            clipChildren = true
+        }
+        // WebView 始终按完整 16:9 画布绘制；只缩小外层窗口并平移子视图，
+        // 让透明边缘落在窗口外，不再拦截屏幕触摸，也不拉伸宠物。
+        frame.addView(web, FrameLayout.LayoutParams(size, height).apply {
+            gravity = Gravity.TOP or Gravity.LEFT
+        })
 
         // 拖动 + 轻点判定
         var downRawX = 0f; var downRawY = 0f
-        var startX = 0; var startY = 0
+        var lastRawX = 0f; var lastRawY = 0f
         var moved = false
         frame.setOnTouchListener { _, event ->
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     downRawX = event.rawX; downRawY = event.rawY
-                    startX = params.x; startY = params.y
+                    lastRawX = event.rawX; lastRawY = event.rawY
                     moved = false; true
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -154,8 +161,10 @@ class PetService : Service() {
                     val dy = (event.rawY - downRawY).toInt()
                     if (moved || dx * dx + dy * dy > 100) {
                         moved = true
-                        params.x = startX + dx
-                        params.y = startY - dy
+                        // 增量位移保留边界测量对窗口位置的修正，拖动期间也不会跳位。
+                        params.x += (event.rawX - lastRawX).roundToInt()
+                        params.y -= (event.rawY - lastRawY).roundToInt()
+                        lastRawX = event.rawX; lastRawY = event.rawY
                         windowManager.updateViewLayout(frame, params)
                     }
                     true
@@ -175,7 +184,9 @@ class PetService : Service() {
         web.addJavascriptInterface(object : Any() {
             @android.webkit.JavascriptInterface
             fun onBox(l: Double, t: Double, w: Double, h: Double) {
-                if (w <= 0.0 || h <= 0.0) return
+                if (!l.isFinite() || !t.isFinite() || !w.isFinite() || !h.isFinite()) return
+                if (l < 0.0 || t < 0.0 || w <= 0.0 || h <= 0.0 ||
+                    l + w > 1.000001 || t + h > 1.000001) return
                 runOnUiThread { applyPetBox(params, frame, l, t, w, h) }
             }
 
@@ -198,19 +209,35 @@ class PetService : Service() {
 
     /**
      * JS 报告宠物边界（源视频 640x360 中的归一化 l/t/w/h）。
-     * 悬浮窗宽度保持「设定宠物宽度」，高度按边界纵横比收缩；
-     * 中心点保持不动。变化幅度 <5% 时忽略，避免窗口抖动。
+     * 用完整画布的固定比例计算窗口宽高，同时裁掉左右和上下透明区域。
+     * 平移窗口与 WebView 的偏移互相抵消，宠物的屏幕位置和大小保持稳定。
      */
     private fun applyPetBox(params: WindowManager.LayoutParams, frame: View, l: Double, t: Double, w: Double, h: Double) {
-        val oldW = params.width
-        val oldH = params.height
-        if (oldW <= 0 || oldH <= 0) return
-        // 边界纵横比（h/w 的像素比）：(h/360) / (w/640) = h*640 / (w*360)
-        val newH = (oldW.toDouble() * (h * 640.0) / (w * 360.0)).toInt().coerceAtLeast(oldW / 3)
-        if (Math.abs(newH - oldH) < oldH * 0.05) return
+        val web = webView ?: return
+        if (container !== frame) return
+        val child = web.layoutParams as FrameLayout.LayoutParams
+        val fullW = child.width
+        val fullH = child.height
+        val left = (l * fullW).roundToInt().coerceIn(0, fullW - 1)
+        val top = (t * fullH).roundToInt().coerceIn(0, fullH - 1)
+        val right = ((l + w) * fullW).roundToInt().coerceIn(left + 1, fullW)
+        val bottom = ((t + h) * fullH).roundToInt().coerceIn(top + 1, fullH)
+        val newW = right - left
+        val newH = bottom - top
+        val oldLeft = -child.leftMargin
+        val oldBottomInset = fullH + child.topMargin - params.height
+        val bottomInset = fullH - bottom
+        if (params.width == newW && params.height == newH &&
+            left == oldLeft && bottomInset == oldBottomInset) return
+
+        params.x += left - oldLeft
+        // gravity=BOTTOM：窗口底边向上裁掉多少，y 就增加多少。
+        params.y += bottomInset - oldBottomInset
+        params.width = newW
         params.height = newH
-        // gravity=BOTTOM：y 是窗口底边到屏幕底边的距离，保持中心 → y += (oldH - newH)/2
-        params.y = Math.max(0, params.y + (oldH - newH) / 2)
+        child.leftMargin = -left
+        child.topMargin = -top
+        web.layoutParams = child
         windowManager.updateViewLayout(frame, params)
     }
 
@@ -229,6 +256,7 @@ class PetService : Service() {
 
     override fun onDestroy() {
         isRunning = false
+        mainHandler.removeCallbacksAndMessages(null)
         container?.let { windowManager.removeView(it) }
         container = null
         webView?.destroy()

@@ -26,7 +26,6 @@ const octx = off.getContext('2d', { willReadFrequently: true });
 let CFG = null;
 let currentMode = 'chain';
 let running = false;
-let box = null;            // 当前测量到的宠物边界（源视频 640x360 像素坐标）
 let lastSentBox = null;
 
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
@@ -107,26 +106,23 @@ function measure() {
   const pxMaxX = Math.min(639, maxX * 2 + 9), pxMaxY = Math.min(359, maxY * 2 + 9);
   const b = { l: pxMinX / 640, t: pxMinY / 360, w: (pxMaxX - pxMinX + 1) / 640, h: (pxMaxY - pxMinY + 1) / 360 };
   if (lastSentBox &&
-      Math.abs(lastSentBox.l - b.l) < 0.03 && Math.abs(lastSentBox.w - b.w) < 0.03 &&
-      Math.abs(lastSentBox.t - b.t) < 0.03 && Math.abs(lastSentBox.h - b.h) < 0.03) return;
+      Math.abs(lastSentBox.l - b.l) * 640 < 4 && Math.abs(lastSentBox.w - b.w) * 640 < 4 &&
+      Math.abs(lastSentBox.t - b.t) * 360 < 4 && Math.abs(lastSentBox.h - b.h) * 360 < 4) return;
   lastSentBox = b;
-  box = b;
   if (window.PetBox) window.PetBox.onBox(b.l, b.t, b.w, b.h);
 }
 video.addEventListener('timeupdate', measure);   // ~4Hz 节流
 video.addEventListener('loadeddata', measure);
 
-// ===== 绘制：按测得边界做源裁剪，宠物撑满整个悬浮窗 =====
+// ===== 固定比例绘制完整画布；安卓端缩小外层窗口并平移 WebView 来裁掉空白 =====
 function frame() {
   if (video.readyState >= 2) {
-    const cw = canvas.width = canvas.clientWidth * devicePixelRatio;
-    const ch = canvas.height = canvas.clientHeight * devicePixelRatio;
+    const cw = Math.max(1, Math.round(canvas.clientWidth * devicePixelRatio));
+    const ch = Math.max(1, Math.round(canvas.clientHeight * devicePixelRatio));
+    if (canvas.width !== cw) canvas.width = cw;
+    if (canvas.height !== ch) canvas.height = ch;
     ctx.clearRect(0, 0, cw, ch);
-    if (box) {
-      ctx.drawImage(video, box.l * 640, box.t * 360, box.w * 640, box.h * 360, 0, 0, cw, ch);
-    } else {
-      ctx.drawImage(video, 0, 0, cw, ch);
-    }
+    ctx.drawImage(video, 0, 0, cw, ch);
   }
   requestAnimationFrame(frame);
 }
