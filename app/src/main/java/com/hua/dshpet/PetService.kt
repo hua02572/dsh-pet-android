@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.IBinder
 import android.view.Gravity
@@ -33,12 +34,16 @@ class PetService : Service() {
         /** 供 App 界面判断服务是否在跑（换大小后决定要不要重启） */
         @Volatile
         var isRunning = false
+        @Volatile
+        var debugStatus = "桌宠尚未开启"
     }
 
     private lateinit var windowManager: WindowManager
     private var container: FrameLayout? = null
     private var webView: WebView? = null
     private var layoutParams: WindowManager.LayoutParams? = null
+    private var cropLeft = 0
+    private var cropBottom = 0
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -121,12 +126,7 @@ class PetService : Service() {
             settings.javaScriptEnabled = true
             settings.mediaPlaybackRequiresUserGesture = false
             settings.allowFileAccess = true
-            // 关键：允许 file:// 页面读取同源媒体画入 canvas 的像素，
-            // 否则 getImageData 抛 SecurityError（画布被污染），边界测量失效
-            @Suppress("DEPRECATION")
-            settings.allowFileAccessFromFileURLs = true
-            @Suppress("DEPRECATION")
-            settings.allowUniversalAccessFromFileURLs = true
+            settings.useWideViewPort = false
             webViewClient = WebViewClient()
         }
         webView = web
@@ -139,11 +139,15 @@ class PetService : Service() {
             setBackgroundColor(Color.TRANSPARENT)
             clipChildren = true
         }
-        // WebView 始终按完整 16:9 画布绘制；只缩小外层窗口并平移子视图，
-        // 让透明边缘落在窗口外，不再拦截屏幕触摸，也不拉伸宠物。
-        frame.addView(web, FrameLayout.LayoutParams(size, height).apply {
-            gravity = Gravity.TOP or Gravity.LEFT
-        })
+        if (getSharedPreferences("pet", MODE_PRIVATE).getBoolean("debugBounds", false)) {
+            frame.foreground = GradientDrawable().apply {
+                setColor(Color.TRANSPARENT)
+                setStroke((resources.displayMetrics.density * 1.5f).roundToInt(), Color.MAGENTA)
+            }
+        }
+        // 子视图与实际触摸窗口同大；源图裁剪在 canvas 内完成，不使用负边距。
+        frame.addView(web, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
 
         // 拖动 + 轻点判定
         var downRawX = 0f; var downRawY = 0f
@@ -180,64 +184,85 @@ class PetService : Service() {
         container = frame
         windowManager.addView(frame, params)
 
-        // JS 端逐帧测量宠物不透明边界 → 动态把悬浮窗缩到贴合宠物本体（两侧空白不遮挡）
-        web.addJavascriptInterface(object : Any() {
-            @android.webkit.JavascriptInterface
-            fun onBox(l: Double, t: Double, w: Double, h: Double) {
-                if (!l.isFinite() || !t.isFinite() || !w.isFinite() || !h.isFinite()) return
-                if (l < 0.0 || t < 0.0 || w <= 0.0 || h <= 0.0 ||
-                    l + w > 1.000001 || t + h > 1.000001) return
-                runOnUiThread { applyPetBox(params, frame, l, t, w, h) }
-            }
-
-            @android.webkit.JavascriptInterface
-            fun onDebug(msg: String?) {
-                android.util.Log.w("PetService", "js: $msg")
-            }
-        }, "PetBox")
+        // 页面加载前就用待机素材的真实边界缩窗；即便网页回调失败，也不回退为整幅画布。
+        try {
+            val config = JSONObject(assets.open("pet/pet-config.json").bufferedReader().use { it.readText() })
+            val bounds = JSONObject(assets.open("pet/pet-bounds.json").bufferedReader().use { it.readText() })
+            val first = bounds.getJSONObject("clips").getJSONObject(config.getJSONArray("idle").getString(0))
+                .getJSONArray("frames").getJSONArray(0)
+            applyPetBox(params, frame, first.getDouble(0) / 640, first.getDouble(1) / 360,
+                first.getDouble(2) / 640, first.getDouble(3) / 360)
+            val density = resources.displayMetrics.density
+            debugStatus = "初始触摸窗口 ${(params.width / density).roundToInt()} × ${(params.height / density).roundToInt()} dp\n正在启动动画"
+        } catch (e: Exception) {
+            debugStatus = "初始裁剪失败：${e.message}"
+            android.util.Log.e("PetService", debugStatus, e)
+        }
 
         web.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 injectConfig()
+                startBoxPolling(web, params, frame)
             }
         }
         web.loadUrl("file:///android_asset/pet/index.html")
     }
 
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
-    private fun runOnUiThread(block: () -> Unit) { mainHandler.post(block) }
+    private fun startBoxPolling(web: WebView, params: WindowManager.LayoutParams, frame: View) {
+        mainHandler.removeCallbacksAndMessages(null)
+        val poll = object : Runnable {
+            override fun run() {
+                if (webView !== web || container !== frame) return
+                web.evaluateJavascript("window.getPetBox ? window.getPetBox() : null") { value ->
+                    if (webView !== web || container !== frame) return@evaluateJavascript
+                    try {
+                        if (value != null && value != "null") {
+                            val b = JSONObject(value)
+                            applyPetBox(params, frame, b.getDouble("l"), b.getDouble("t"),
+                                b.getDouble("w"), b.getDouble("h"))
+                            val density = resources.displayMetrics.density
+                            debugStatus = "触摸窗口 ${(params.width / density).roundToInt()} × ${(params.height / density).roundToInt()} dp\n" +
+                                "预采样边界已生效；网页 ${b.optInt("cw")} × ${b.optInt("ch")}"
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.w("PetService", "bounds polling failed", e)
+                    }
+                    mainHandler.postDelayed(this, 80)
+                }
+            }
+        }
+        mainHandler.post(poll)
+    }
 
     /**
      * JS 报告宠物边界（源视频 640x360 中的归一化 l/t/w/h）。
      * 用完整画布的固定比例计算窗口宽高，同时裁掉左右和上下透明区域。
-     * 平移窗口与 WebView 的偏移互相抵消，宠物的屏幕位置和大小保持稳定。
+     * 保留源画布的屏幕锚点，避免边界变化导致宠物跳位。
      */
     private fun applyPetBox(params: WindowManager.LayoutParams, frame: View, l: Double, t: Double, w: Double, h: Double) {
-        val web = webView ?: return
         if (container !== frame) return
-        val child = web.layoutParams as FrameLayout.LayoutParams
-        val fullW = child.width
-        val fullH = child.height
+        if (!l.isFinite() || !t.isFinite() || !w.isFinite() || !h.isFinite() ||
+            l < 0 || t < 0 || w <= 0 || h <= 0 || l + w > 1.000001 || t + h > 1.000001) return
+        val fullW = petSizePx()
+        val fullH = (fullW * 9f / 16f).roundToInt()
         val left = (l * fullW).roundToInt().coerceIn(0, fullW - 1)
         val top = (t * fullH).roundToInt().coerceIn(0, fullH - 1)
         val right = ((l + w) * fullW).roundToInt().coerceIn(left + 1, fullW)
         val bottom = ((t + h) * fullH).roundToInt().coerceIn(top + 1, fullH)
         val newW = right - left
         val newH = bottom - top
-        val oldLeft = -child.leftMargin
-        val oldBottomInset = fullH + child.topMargin - params.height
         val bottomInset = fullH - bottom
         if (params.width == newW && params.height == newH &&
-            left == oldLeft && bottomInset == oldBottomInset) return
+            left == cropLeft && bottomInset == cropBottom) return
 
-        params.x += left - oldLeft
+        params.x += left - cropLeft
         // gravity=BOTTOM：窗口底边向上裁掉多少，y 就增加多少。
-        params.y += bottomInset - oldBottomInset
+        params.y += bottomInset - cropBottom
         params.width = newW
         params.height = newH
-        child.leftMargin = -left
-        child.topMargin = -top
-        web.layoutParams = child
+        cropLeft = left
+        cropBottom = bottomInset
         windowManager.updateViewLayout(frame, params)
     }
 
@@ -245,9 +270,11 @@ class PetService : Service() {
     private fun injectConfig() {
         try {
             val json = assets.open("pet/pet-config.json").bufferedReader().use { it.readText() }
+            val bounds = assets.open("pet/pet-bounds.json").bufferedReader().use { it.readText() }
             JSONObject(json) // 校验 JSON 合法，坏了就别启动动画链
+            JSONObject(bounds)
             webView?.evaluateJavascript(
-                "window.__PET_CONFIG__ = $json; window.startPet && window.startPet();", null
+                "window.__PET_CONFIG__ = $json; window.__PET_BOUNDS__ = $bounds; window.startPet && window.startPet();", null
             )
         } catch (e: Exception) {
             android.util.Log.e("PetService", "config inject failed", e)

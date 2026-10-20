@@ -7,12 +7,21 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.TextView
 
 class MainActivity : Activity() {
 
     private val overlayRequestCode = 1001
+    private var statusText: TextView? = null
+    private val statusHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val refreshStatus = object : Runnable {
+        override fun run() {
+            statusText?.text = PetService.debugStatus
+            statusHandler.postDelayed(this, 500)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -27,7 +36,7 @@ class MainActivity : Activity() {
             setPadding(pad, pad * 2, pad, pad)
         }
         val title = TextView(this).apply {
-            text = "桌宠（dsh-pet 安卓版）\n\n1. 点「开启桌宠」\n2. 系统跳转授权页时，允许「显示在其他应用上层」\n3. 回来再点一次「开启桌宠」\n\n换大小后点「应用大小并重启」生效"
+            text = "桌宠 1.0.2（预采样裁剪版）\n\n1. 点「开启桌宠」\n2. 允许「显示在其他应用上层」\n3. 回来再点一次「开启桌宠」\n\n粉色边框表示真正拦截触摸的窗口范围。"
             textSize = 15f
         }
         val btnStart = Button(this).apply { text = "开启桌宠" }
@@ -80,7 +89,31 @@ class MainActivity : Activity() {
         root.addView(btnStop)
         root.addView(sizeRow)
         root.addView(btnApply)
+        val debugBox = CheckBox(this).apply {
+            text = "显示触摸窗口边框"
+            isChecked = getSharedPreferences("pet", MODE_PRIVATE).getBoolean("debugBounds", false)
+            setOnCheckedChangeListener { _, checked ->
+                getSharedPreferences("pet", MODE_PRIVATE).edit().putBoolean("debugBounds", checked).apply()
+                if (PetService.isRunning) {
+                    stopService(Intent(this@MainActivity, PetService::class.java))
+                    startForegroundService(Intent(this@MainActivity, PetService::class.java))
+                }
+            }
+        }
+        root.addView(debugBox)
+        statusText = TextView(this).apply { text = PetService.debugStatus }
+        root.addView(statusText)
         setContentView(root)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        statusHandler.post(refreshStatus)
+    }
+
+    override fun onPause() {
+        statusHandler.removeCallbacks(refreshStatus)
+        super.onPause()
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -90,3 +123,4 @@ class MainActivity : Activity() {
         }
     }
 }
+

@@ -6,123 +6,88 @@
 <style>
   html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; width: 100%; height: 100%; }
   canvas { width: 100%; height: 100%; display: block; }
+  video { position: absolute; left: -100px; top: -100px; width: 1px; height: 1px; }
 </style>
 </head>
 <body>
 <canvas id="stage"></canvas>
-<video id="player" playsinline muted style="display:none"></video>
+<video id="player" playsinline muted></video>
 <script>
-// ===== 动画链（复刻 dsh-pet 桌面版权重逻辑，无 AI 功能） =====
-// 额外能力：实时测量每帧宠物的不透明边界（alpha bbox），报告给安卓端
-// 把悬浮窗动态缩到贴合宠物本体——两侧空白不再遮挡屏幕。
-
+// 所有素材的 alpha 边界已在桌面 Chromium 中每 0.2 秒预采样。
+// 手机只按播放时间查表，不依赖 WebView 的像素读取或 JavascriptInterface 回调。
 const canvas = document.getElementById('stage');
 const video = document.getElementById('player');
 const ctx = canvas.getContext('2d');
-const off = document.createElement('canvas');
-off.width = 640; off.height = 360;
-const octx = off.getContext('2d', { willReadFrequently: true });
-
-let CFG = null;
-let currentMode = 'chain';
-let running = false;
-let lastSentBox = null;
+let CFG = null, BOUNDS = null, currentFile = '', running = false;
+let drawBox = null;
 
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 
 function pickChainCategory() {
-  const w = (CFG && CFG.weights) || { idle: 10, actions: 5 };
-  const total = (w.idle || 0) + (w.actions || 0);
+  const weights = CFG.weights || { idle: 10, actions: 5 };
+  const total = (weights.idle || 0) + (weights.actions || 0);
   let r = Math.random() * total;
-  if ((r -= (w.idle || 0)) < 0 && CFG.idle.length) return CFG.idle;
+  if ((r -= (weights.idle || 0)) < 0 && CFG.idle.length) return CFG.idle;
   return CFG.actions.length ? CFG.actions : CFG.idle;
 }
 
-function assetUrl(file) {
-  return 'file:///android_asset/pet/webm/' + encodeURIComponent(file);
+function boxAt(time) {
+  const clip = BOUNDS && BOUNDS.clips[currentFile];
+  if (!clip) return drawBox;
+  const index = Math.min(clip.frames.length - 1, Math.floor(time / BOUNDS.step));
+  // 相邻采样合并，给动作移动和安卓端 80ms 读取间隔留出余量。
+  let left = 640, top = 360, right = 0, bottom = 0;
+  for (let i = Math.max(0, index - 1); i <= Math.min(clip.frames.length - 1, index + 1); i++) {
+    const f = clip.frames[i];
+    if (!f) continue;
+    left = Math.min(left, f[0]); top = Math.min(top, f[1]);
+    right = Math.max(right, f[0] + f[2]); bottom = Math.max(bottom, f[1] + f[3]);
+  }
+  if (right <= left || bottom <= top) return drawBox;
+  return { l: left / 640, t: top / 360, w: (right - left) / 640, h: (bottom - top) / 360 };
+}
+
+function playFile(file) {
+  currentFile = file;
+  drawBox = boxAt(0);
+  video.src = 'file:///android_asset/pet/webm/' + encodeURIComponent(file);
+  video.play().catch(() => setTimeout(playChain, 300));
 }
 
 function playChain() {
-  if (!running || !CFG) return;
-  currentMode = 'chain';
-  const cat = pickChainCategory();
-  video.src = assetUrl(pick(cat));
-  video.play().catch(() => setTimeout(playChain, 300));
+  if (running && CFG) playFile(pick(pickChainCategory()));
 }
 
-function playTap() {
-  if (!running || !CFG || !CFG.tap.length) return;
-  currentMode = 'tap';
-  video.src = assetUrl(pick(CFG.tap));
-  video.play().catch(() => setTimeout(playChain, 300));
-}
-
-window.petTap = playTap;
-
-window.startPet = function () {
-  if (running) return;
-  if (!window.__PET_CONFIG__) return;
-  CFG = window.__PET_CONFIG__;
-  if (!CFG.idle.length) return;
-  running = true;
-  playChain();
+window.petTap = function () {
+  if (running && CFG && CFG.tap.length) playFile(pick(CFG.tap));
 };
 
-video.addEventListener('ended', () => playChain());
+window.startPet = function () {
+  if (running || !window.__PET_CONFIG__ || !window.__PET_BOUNDS__) return;
+  CFG = window.__PET_CONFIG__; BOUNDS = window.__PET_BOUNDS__;
+  if (!CFG.idle.length) return;
+  running = true;
+  // 与安卓窗口加载前使用的初始边界对应。
+  playFile(CFG.idle[0]);
+};
 
-// ===== alpha 边界测量（按列/行统计不透明像素密度，阈值 40 过滤淡阴影，密度过滤孤立噪点） =====
-function measure() {
-  if (video.readyState < 2) return;
-  octx.clearRect(0, 0, 640, 360);
-  octx.drawImage(video, 0, 0, 640, 360);
-  let d;
-  try { d = octx.getImageData(0, 0, 640, 360).data; }
-  catch (e) {
-    // 画布被污染（读取像素被拒）——把失败原因报给安卓端，便于排障
-    if (window.PetBox && !window.__taintReported) {
-      window.__taintReported = true;
-      window.PetBox.onDebug('measure failed: ' + (e && e.message || e));
-    }
-    return;
-  }
-  const CW = 320, RH = 180;                 // 抽样网格：每 2px 一格
-  const cols = new Array(CW).fill(0);
-  const rows = new Array(RH).fill(0);
-  for (let y = 0; y < 180; y++) {
-    const base = y * 2 * 640 * 4;
-    for (let x = 0; x < 320; x++) {
-      if (d[base + x * 8 + 3] > 40) {       // alpha 阈值 40：淡阴影/噪点不算本体
-        cols[x]++; rows[y]++;
-      }
-    }
-  }
-  // 列/行至少 3 个不透明样本才算本体（180 行采样中 ≥3 ≈ 实体而非杂散光斑）
-  const need = 3;
-  let minX = -1, maxX = -1, minY = -1, maxY = -1;
-  for (let x = 0; x < CW; x++) if (cols[x] >= need) { if (minX < 0) minX = x; maxX = x; }
-  for (let y = 0; y < RH; y++) if (rows[y] >= need) { if (minY < 0) minY = y; maxY = y; }
-  if (minX < 0 || minY < 0) return;
-  const pxMinX = Math.max(0, minX * 2 - 8), pxMinY = Math.max(0, minY * 2 - 8);
-  const pxMaxX = Math.min(639, maxX * 2 + 9), pxMaxY = Math.min(359, maxY * 2 + 9);
-  const b = { l: pxMinX / 640, t: pxMinY / 360, w: (pxMaxX - pxMinX + 1) / 640, h: (pxMaxY - pxMinY + 1) / 360 };
-  if (lastSentBox &&
-      Math.abs(lastSentBox.l - b.l) * 640 < 4 && Math.abs(lastSentBox.w - b.w) * 640 < 4 &&
-      Math.abs(lastSentBox.t - b.t) * 360 < 4 && Math.abs(lastSentBox.h - b.h) * 360 < 4) return;
-  lastSentBox = b;
-  if (window.PetBox) window.PetBox.onBox(b.l, b.t, b.w, b.h);
-}
-video.addEventListener('timeupdate', measure);   // ~4Hz 节流
-video.addEventListener('loadeddata', measure);
+window.getPetBox = function () {
+  drawBox = boxAt(video.currentTime || 0);
+  if (!drawBox) return null;
+  return { ...drawBox, cw: canvas.clientWidth, ch: canvas.clientHeight, file: currentFile };
+};
 
-// ===== 固定比例绘制完整画布；安卓端缩小外层窗口并平移 WebView 来裁掉空白 =====
+video.addEventListener('ended', playChain);
+
 function frame() {
-  if (video.readyState >= 2) {
+  if (video.readyState >= 2 && drawBox) {
     const cw = Math.max(1, Math.round(canvas.clientWidth * devicePixelRatio));
     const ch = Math.max(1, Math.round(canvas.clientHeight * devicePixelRatio));
     if (canvas.width !== cw) canvas.width = cw;
     if (canvas.height !== ch) canvas.height = ch;
     ctx.clearRect(0, 0, cw, ch);
-    ctx.drawImage(video, 0, 0, cw, ch);
+    ctx.drawImage(video, drawBox.l * 640, drawBox.t * 360, drawBox.w * 640, drawBox.h * 360,
+      0, 0, cw, ch);
   }
   requestAnimationFrame(frame);
 }
