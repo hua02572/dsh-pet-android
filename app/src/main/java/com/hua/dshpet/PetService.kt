@@ -110,12 +110,14 @@ class PetService : Service() {
             settings.mediaPlaybackRequiresUserGesture = false
             settings.allowFileAccess = true
             webViewClient = WebViewClient()
-            // 页面内所有触摸都透传给容器的拖拽/点按判定
-            setOnTouchListener { _, _ -> true }
         }
         webView = web
 
-        val frame = FrameLayout(this).apply { setBackgroundColor(Color.TRANSPARENT) }
+        // 容器拦截全部触摸（onInterceptTouchEvent=true），
+        // 触摸由容器的 OnTouchListener 统一处理拖动与点按，WebView 不参与手势
+        val frame = object : FrameLayout(this) {
+            override fun onInterceptTouchEvent(ev: MotionEvent?): Boolean = true
+        }.apply { setBackgroundColor(Color.TRANSPARENT) }
         frame.addView(web, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
 
