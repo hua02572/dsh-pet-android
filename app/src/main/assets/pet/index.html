@@ -13,20 +13,24 @@
 <video id="player" playsinline muted style="display:none"></video>
 <script>
 // ===== 动画链（复刻 dsh-pet 桌面版权重逻辑，无 AI 功能） =====
-// 窗口注入 window.__PET_CONFIG__ = { idle:[], actions:[], tap:[], weights:{idle,actions} }
-// 待机/动作播完按权重随机衔接；轻点窗口 → 随机播一个"点击回应"，播完回链。
+// 额外能力：实时测量每帧宠物的不透明边界（alpha bbox），报告给安卓端
+// 把悬浮窗动态缩到贴合宠物本体——两侧空白不再遮挡屏幕。
 
 const canvas = document.getElementById('stage');
 const video = document.getElementById('player');
 const ctx = canvas.getContext('2d');
+const off = document.createElement('canvas');
+off.width = 640; off.height = 360;
+const octx = off.getContext('2d', { willReadFrequently: true });
 
 let CFG = null;
-let currentMode = 'chain';   // chain | tap
+let currentMode = 'chain';
 let running = false;
+let box = null;            // 当前测量到的宠物边界（源视频 640x360 像素坐标）
+let lastSentBox = null;
 
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 
-// 权重随机选类别：idle:10 / actions:5（与桌面版默认一致）
 function pickChainCategory() {
   const w = (CFG && CFG.weights) || { idle: 10, actions: 5 };
   const total = (w.idle || 0) + (w.actions || 0);
@@ -57,7 +61,7 @@ function playTap() {
 window.petTap = playTap;
 
 window.startPet = function () {
-  if (running) { return; }
+  if (running) return;
   if (!window.__PET_CONFIG__) return;
   CFG = window.__PET_CONFIG__;
   if (!CFG.idle.length) return;
@@ -65,23 +69,52 @@ window.startPet = function () {
   playChain();
 };
 
-video.addEventListener('ended', () => {
-  if (currentMode === 'tap') playChain(); else playChain();
-});
+video.addEventListener('ended', () => playChain());
 
-// 尺寸自适应（悬浮窗尺寸固定，ratio 16:9）
-function fit() {
-  canvas.width = canvas.clientWidth * devicePixelRatio;
-  canvas.height = canvas.clientHeight * devicePixelRatio;
+// ===== alpha 边界测量（浏览器能读到 VP9 alpha；抽行采样 + 24 阈值抗噪） =====
+function measure() {
+  if (video.readyState < 2) return;
+  octx.clearRect(0, 0, 640, 360);
+  octx.drawImage(video, 0, 0, 640, 360);
+  let d;
+  try { d = octx.getImageData(0, 0, 640, 360).data; } catch (e) { return; }
+  let minX = 640, minY = 360, maxX = -1, maxY = -1;
+  for (let y = 0; y < 360; y += 2) {
+    const row = y * 640 * 4;
+    for (let x = 0; x < 640; x += 2) {
+      if (d[row + x * 4 + 3] > 24) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX < 0) return;
+  minX = Math.max(0, minX - 8); minY = Math.max(0, minY - 8);
+  maxX = Math.min(639, maxX + 8); maxY = Math.min(359, maxY + 8);
+  const b = { l: minX / 640, t: minY / 360, w: (maxX - minX + 1) / 640, h: (maxY - minY + 1) / 360 };
+  if (lastSentBox &&
+      Math.abs(lastSentBox.l - b.l) < 0.03 && Math.abs(lastSentBox.w - b.w) < 0.03 &&
+      Math.abs(lastSentBox.t - b.t) < 0.03 && Math.abs(lastSentBox.h - b.h) < 0.03) return;
+  lastSentBox = b;
+  box = b;
+  if (window.PetBox) window.PetBox.onBox(b.l, b.t, b.w, b.h);
 }
-window.addEventListener('resize', fit);
+video.addEventListener('timeupdate', measure);   // ~4Hz 节流
+video.addEventListener('loadeddata', measure);
 
-// 逐帧绘制：Canvas 保留视频 alpha 通道，页面背景透明 → 悬浮窗透出桌面
+// ===== 绘制：按测得边界做源裁剪，宠物撑满整个悬浮窗 =====
 function frame() {
   if (video.readyState >= 2) {
-    fit();
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const cw = canvas.width = canvas.clientWidth * devicePixelRatio;
+    const ch = canvas.height = canvas.clientHeight * devicePixelRatio;
+    ctx.clearRect(0, 0, cw, ch);
+    if (box) {
+      ctx.drawImage(video, box.l * 640, box.t * 360, box.w * 640, box.h * 360, 0, 0, cw, ch);
+    } else {
+      ctx.drawImage(video, 0, 0, cw, ch);
+    }
   }
   requestAnimationFrame(frame);
 }

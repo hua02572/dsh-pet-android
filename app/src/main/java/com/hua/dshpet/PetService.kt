@@ -165,12 +165,42 @@ class PetService : Service() {
         container = frame
         windowManager.addView(frame, params)
 
+        // JS 端逐帧测量宠物不透明边界 → 动态把悬浮窗缩到贴合宠物本体（两侧空白不遮挡）
+        web.addJavascriptInterface(object : Any() {
+            @android.webkit.JavascriptInterface
+            fun onBox(l: Double, t: Double, w: Double, h: Double) {
+                if (w <= 0.0 || h <= 0.0) return
+                runOnUiThread { applyPetBox(params, frame, l, t, w, h) }
+            }
+        }, "PetBox")
+
         web.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 injectConfig()
             }
         }
         web.loadUrl("file:///android_asset/pet/index.html")
+    }
+
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private fun runOnUiThread(block: () -> Unit) { mainHandler.post(block) }
+
+    /**
+     * JS 报告宠物边界（源视频 640x360 中的归一化 l/t/w/h）。
+     * 悬浮窗宽度保持「设定宠物宽度」，高度按边界纵横比收缩；
+     * 中心点保持不动。变化幅度 <5% 时忽略，避免窗口抖动。
+     */
+    private fun applyPetBox(params: WindowManager.LayoutParams, frame: View, l: Double, t: Double, w: Double, h: Double) {
+        val oldW = params.width
+        val oldH = params.height
+        if (oldW <= 0 || oldH <= 0) return
+        // 边界纵横比（h/w 的像素比）：(h/360) / (w/640) = h*640 / (w*360)
+        val newH = (oldW.toDouble() * (h * 640.0) / (w * 360.0)).toInt().coerceAtLeast(oldW / 3)
+        if (Math.abs(newH - oldH) < oldH * 0.05) return
+        params.height = newH
+        // gravity=BOTTOM：y 是窗口底边到屏幕底边的距离，保持中心 → y += (oldH - newH)/2
+        params.y = Math.max(0, params.y + (oldH - newH) / 2)
+        windowManager.updateViewLayout(frame, params)
     }
 
     /** 从 assets 读 pet-config.json，注入页面后启动动画链 */
