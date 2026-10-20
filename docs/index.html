@@ -2,135 +2,174 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#1b2340">
+<title>桌宠</title>
 <style>
-  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; width: 100%; height: 100%; }
-  canvas { width: 100%; height: 100%; display: block; }
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+  body {
+    background: linear-gradient(180deg, #1b2340 0%, #2a3560 55%, #3d4a7d 100%);
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    touch-action: manipulation;
+    -webkit-user-select: none; user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #hint {
+    position: fixed; top: env(safe-area-inset-top, 12px); left: 0; right: 0;
+    text-align: center; color: rgba(255,255,255,.55); font-size: 12px;
+    pointer-events: none; transition: opacity 1s; z-index: 5;
+  }
+  #pet {
+    position: fixed; left: 20px; bottom: 90px;
+    width: 46vw; max-width: 300px; aspect-ratio: 16 / 9;
+    touch-action: none; z-index: 3;
+  }
+  #pet canvas { width: 100%; height: 100%; display: block; }
 </style>
 </head>
 <body>
-<canvas id="stage"></canvas>
+<div id="hint">拖动小女仆换个位置 · 轻点她有回应</div>
+<div id="pet"><canvas id="stage"></canvas></div>
 <video id="player" playsinline muted style="display:none"></video>
 <script>
-// ===== 动画链（复刻 dsh-pet 桌面版权重逻辑，无 AI 功能） =====
-// 额外能力：实时测量每帧宠物的不透明边界（alpha bbox），报告给安卓端
-// 把悬浮窗动态缩到贴合宠物本体——两侧空白不再遮挡屏幕。
+// ===== dsh-pet 网页版（iPhone Safari / 安卓 Chrome 通用） =====
+// 格式选择：Safari 系不支持 webm alpha，用官方 HEVC-alpha .mov；其余用 .webm
+const IS_SAFARI = /^((?!chrome|android|crios|fxios).)*safari/i.test(navigator.userAgent) || /iPhone|iPad|iPod/i.test(navigator.userAgent);
+const EXT = IS_SAFARI ? 'mov' : 'webm';
 
+const petEl = document.getElementById('pet');
 const canvas = document.getElementById('stage');
-const video = document.getElementById('player');
 const ctx = canvas.getContext('2d');
+const video = document.getElementById('player');
 const off = document.createElement('canvas');
 off.width = 640; off.height = 360;
 const octx = off.getContext('2d', { willReadFrequently: true });
 
-let CFG = null;
-let currentMode = 'chain';
-let running = false;
-let box = null;            // 当前测量到的宠物边界（源视频 640x360 像素坐标）
-let lastSentBox = null;
+let CFG = null, currentMode = 'chain', running = false, box = null, lastSentBox = null;
 
-function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
-
+function pick(a) { return a[Math.floor(Math.random() * a.length)]; }
 function pickChainCategory() {
   const w = (CFG && CFG.weights) || { idle: 10, actions: 5 };
-  const total = (w.idle || 0) + (w.actions || 0);
-  let r = Math.random() * total;
+  let r = Math.random() * ((w.idle || 0) + (w.actions || 0));
   if ((r -= (w.idle || 0)) < 0 && CFG.idle.length) return CFG.idle;
   return CFG.actions.length ? CFG.actions : CFG.idle;
 }
-
-function assetUrl(file) {
-  return 'file:///android_asset/pet/webm/' + encodeURIComponent(file);
-}
+function assetUrl(f) { return EXT + '/' + encodeURIComponent(f); }
 
 function playChain() {
   if (!running || !CFG) return;
   currentMode = 'chain';
-  const cat = pickChainCategory();
-  video.src = assetUrl(pick(cat));
-  video.play().catch(() => setTimeout(playChain, 300));
+  video.src = assetUrl(pick(pickChainCategory()));
+  video.play().catch(() => setTimeout(playChain, 400));
 }
-
 function playTap() {
   if (!running || !CFG || !CFG.tap.length) return;
   currentMode = 'tap';
   video.src = assetUrl(pick(CFG.tap));
-  video.play().catch(() => setTimeout(playChain, 300));
+  video.play().catch(() => setTimeout(playChain, 400));
 }
-
 window.petTap = playTap;
-
 window.startPet = function () {
-  if (running) return;
-  if (!window.__PET_CONFIG__) return;
+  if (running || !window.__PET_CONFIG__) return;
   CFG = window.__PET_CONFIG__;
   if (!CFG.idle.length) return;
   running = true;
   playChain();
 };
-
 video.addEventListener('ended', () => playChain());
 
-// ===== alpha 边界测量（按列/行统计不透明像素密度，阈值 40 过滤淡阴影，密度过滤孤立噪点） =====
+// ===== alpha 边界测量（列/行密度，阈值 40 过滤淡阴影） =====
 function measure() {
   if (video.readyState < 2) return;
   octx.clearRect(0, 0, 640, 360);
   octx.drawImage(video, 0, 0, 640, 360);
   let d;
-  try { d = octx.getImageData(0, 0, 640, 360).data; }
-  catch (e) {
-    // 画布被污染（读取像素被拒）——把失败原因报给安卓端，便于排障
-    if (window.PetBox && !window.__taintReported) {
-      window.__taintReported = true;
-      window.PetBox.onDebug('measure failed: ' + (e && e.message || e));
-    }
-    return;
-  }
-  const CW = 320, RH = 180;                 // 抽样网格：每 2px 一格
-  const cols = new Array(CW).fill(0);
-  const rows = new Array(RH).fill(0);
+  try { d = octx.getImageData(0, 0, 640, 360).data; } catch (e) { return; }
+  const cols = new Array(320).fill(0), rows = new Array(180).fill(0);
   for (let y = 0; y < 180; y++) {
     const base = y * 2 * 640 * 4;
-    for (let x = 0; x < 320; x++) {
-      if (d[base + x * 8 + 3] > 40) {       // alpha 阈值 40：淡阴影/噪点不算本体
-        cols[x]++; rows[y]++;
-      }
-    }
+    for (let x = 0; x < 320; x++) if (d[base + x * 8 + 3] > 40) { cols[x]++; rows[y]++; }
   }
-  // 列/行至少 3 个不透明样本才算本体（180 行采样中 ≥3 ≈ 实体而非杂散光斑）
-  const need = 3;
   let minX = -1, maxX = -1, minY = -1, maxY = -1;
-  for (let x = 0; x < CW; x++) if (cols[x] >= need) { if (minX < 0) minX = x; maxX = x; }
-  for (let y = 0; y < RH; y++) if (rows[y] >= need) { if (minY < 0) minY = y; maxY = y; }
+  for (let x = 0; x < 320; x++) if (cols[x] >= 3) { if (minX < 0) minX = x; maxX = x; }
+  for (let y = 0; y < 180; y++) if (rows[y] >= 3) { if (minY < 0) minY = y; maxY = y; }
   if (minX < 0 || minY < 0) return;
-  const pxMinX = Math.max(0, minX * 2 - 8), pxMinY = Math.max(0, minY * 2 - 8);
-  const pxMaxX = Math.min(639, maxX * 2 + 9), pxMaxY = Math.min(359, maxY * 2 + 9);
-  const b = { l: pxMinX / 640, t: pxMinY / 360, w: (pxMaxX - pxMinX + 1) / 640, h: (pxMaxY - pxMinY + 1) / 360 };
-  if (lastSentBox &&
-      Math.abs(lastSentBox.l - b.l) < 0.03 && Math.abs(lastSentBox.w - b.w) < 0.03 &&
-      Math.abs(lastSentBox.t - b.t) < 0.03 && Math.abs(lastSentBox.h - b.h) < 0.03) return;
-  lastSentBox = b;
-  box = b;
-  if (window.PetBox) window.PetBox.onBox(b.l, b.t, b.w, b.h);
+  const b = {
+    l: Math.max(0, minX * 2 - 8) / 640, t: Math.max(0, minY * 2 - 8) / 360,
+    w: (Math.min(639, maxX * 2 + 9) - Math.max(0, minX * 2 - 8) + 1) / 640,
+    h: (Math.min(359, maxY * 2 + 9) - Math.max(0, minY * 2 - 8) + 1) / 360
+  };
+  if (lastSentBox && Math.abs(lastSentBox.l - b.l) < .03 && Math.abs(lastSentBox.w - b.w) < .03) return;
+  lastSentBox = b; box = b;
+  fitPetBox();
 }
-video.addEventListener('timeupdate', measure);   // ~4Hz 节流
+video.addEventListener('timeupdate', measure);
 video.addEventListener('loadeddata', measure);
 
-// ===== 绘制：按测得边界做源裁剪，宠物撑满整个悬浮窗 =====
+// 窗口随宠物身形收缩（保持底边不动，宠物站在"地面"上）
+function fitPetBox() {
+  if (!box) return;
+  const w = Math.round(Math.min(window.innerWidth * .8, 320) * box.w / .62);
+  petEl.style.width = Math.max(90, Math.min(w, 320)) + 'px';
+}
+
+// ===== 绘制（源裁剪，宠物撑满元素） =====
 function frame() {
   if (video.readyState >= 2) {
-    const cw = canvas.width = canvas.clientWidth * devicePixelRatio;
-    const ch = canvas.height = canvas.clientHeight * devicePixelRatio;
-    ctx.clearRect(0, 0, cw, ch);
-    if (box) {
-      ctx.drawImage(video, box.l * 640, box.t * 360, box.w * 640, box.h * 360, 0, 0, cw, ch);
-    } else {
-      ctx.drawImage(video, 0, 0, cw, ch);
-    }
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = petEl.clientWidth * dpr;
+    canvas.height = petEl.clientHeight * dpr;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (box) ctx.drawImage(video, box.l * 640, box.t * 360, box.w * 640, box.h * 360, 0, 0, canvas.width, canvas.height);
+    else ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
   }
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
+
+// ===== 拖动 + 轻点（触摸） =====
+let sx = 0, sy = 0, ox = 0, oy = 0, moved = false;
+petEl.addEventListener('touchstart', e => {
+  const t = e.touches[0];
+  sx = t.clientX; sy = t.clientY;
+  ox = petEl.offsetLeft; oy = petEl.offsetTop;
+  moved = false;
+}, { passive: true });
+petEl.addEventListener('touchmove', e => {
+  const t = e.touches[0];
+  const dx = t.clientX - sx, dy = t.clientY - sy;
+  if (moved || dx * dx + dy * dy > 100) {
+    moved = true;
+    e.preventDefault();
+    petEl.style.left = (ox + dx) + 'px';
+    petEl.style.bottom = 'auto';
+    petEl.style.top = (oy + dy) + 'px';
+  }
+}, { passive: false });
+petEl.addEventListener('touchend', () => { if (!moved) playTap(); });
+
+// 记忆位置
+function savePos() {
+  localStorage.setItem('petPos', JSON.stringify({ l: petEl.style.left, t: petEl.style.top, b: petEl.style.bottom }));
+}
+setInterval(savePos, 2000);
+(function restore() {
+  try {
+    const p = JSON.parse(localStorage.getItem('petPos') || 'null');
+    if (p && p.l) { petEl.style.left = p.l; if (p.t) { petEl.style.top = p.t; petEl.style.bottom = 'auto'; } }
+  } catch (e) {}
+})();
+
+// ===== 配置加载 =====
+fetch('pet-config.json').then(r => r.json()).then(j => {
+  window.__PET_CONFIG__ = j;
+  window.startPet();
+}).catch(() => {
+  document.getElementById('hint').textContent = '配置加载失败，请刷新重试';
+});
+setTimeout(() => { document.getElementById('hint').style.opacity = '0'; }, 6000);
 </script>
 </body>
 </html>
